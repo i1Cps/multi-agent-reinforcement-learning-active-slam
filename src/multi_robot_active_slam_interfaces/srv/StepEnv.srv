@@ -1,0 +1,8 @@
+
+# Request uses RobotActions, expecting three sets for three robots
+RobotActions[3] multi_robot_actions
+---
+# Response uses the defined messages, expecting three sets for three robots
+RobotState[3] multi_robot_states
+RobotReward[3] multi_robot_rewards
+RobotTerminal[3] multi_robot_terminals
