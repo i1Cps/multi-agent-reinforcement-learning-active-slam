@@ -57,7 +57,7 @@ class LearningEnvironment(Node):
                     LaserScan,
                     f"{namespace}/scan",
                     lambda msg, robot_id=i - 1: self.scan_callback(msg, robot_id),
-                    qos_profile=qos_profile_sensor_data,
+                    1,
                 )
             )
 
@@ -68,7 +68,7 @@ class LearningEnvironment(Node):
                     lambda msg, robot_id=i - 1: self.covariance_matrix_callback(
                         msg, robot_id
                     ),
-                    qos,
+                    10,
                 )
             )
             self.odom_subscribers.append(
@@ -76,7 +76,7 @@ class LearningEnvironment(Node):
                     Odometry,
                     f"{namespace}/odom",
                     lambda msg, robot_id=i - 1: self.odom_callback(msg, robot_id),
-                    qos,
+                    10,
                 )
             )
 
@@ -88,7 +88,7 @@ class LearningEnvironment(Node):
             Pose,
             "/goal_position_reset_pose",
             self.goal_position_reset_pose_callback,
-            qos,
+            10,
         )
 
         self.clock_subscriber = self.create_subscription(
@@ -150,7 +150,7 @@ class LearningEnvironment(Node):
         # Environment CONSTANTS
         self.EPISODE_LENGTH = 60
         self.GOAL_DISTANCE = 0.7
-        self.COLLISION_DISTANCE = 0.18
+        self.COLLISION_DISTANCE = 0.21
 
         # Environment Variables
         self.done = False
@@ -297,6 +297,7 @@ class LearningEnvironment(Node):
             response.multi_robot_states[i].state = state_vector
 
         # TODO: Use ros approved variation of time.sleep()
+        time.sleep(0.5)
         # Pause execution
 
         return response

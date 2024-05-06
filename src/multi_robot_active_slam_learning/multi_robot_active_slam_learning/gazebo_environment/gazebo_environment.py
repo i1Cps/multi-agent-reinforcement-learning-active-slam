@@ -238,7 +238,7 @@ class GazeboEnvironment(Node):
         self._publish_new_goal(init)
 
     def _reset_slam_map(self):
-        time.sleep(3)
+        time.sleep(1.5)
         for i in range(self.num_robots):
             while not self.slam_reset_clients[i].wait_for_service(timeout_sec=1.0):
                 self.get_logger().info("slam map reset service not available")
