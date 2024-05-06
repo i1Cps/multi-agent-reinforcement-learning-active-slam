@@ -1,38 +1,42 @@
-import os
+from pathlib import Path
 import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.distributions import Beta
 
 
 class CriticNetwork(nn.Module):
     def __init__(
         self,
-        beta,
-        input_dims,
-        critic_dims_fc1=400,
-        critic_dims_fc2=300,
-        name="critic",
-        checkpoint_dir="models",
+        input_dims: int,
+        learning_rate: float,
+        fc1: int = 400,
+        fc2: int = 300,
+        name: str = "critic",
+        checkpoint_dir: str = "models/",
+        scenario: str = "unclassified",
     ):
         super(CriticNetwork, self).__init__()
-        self.beta = beta
-        self.checkpoint_dir = checkpoint_dir
-        self.checkpoint_file = os.path.join(self.checkpoint_dir, name + "_maddpg")
+        self.checkpoint_dir = Path(checkpoint_dir) / scenario
+        self.checkpoint_file = self.checkpoint_dir / (name + "mappo")
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Three fully connected layers
-        self.fc1 = nn.Linear(input_dims, critic_dims_fc1)
-        self.fc2 = nn.Linear(critic_dims_fc1, critic_dims_fc2)
-        self.q = nn.Linear(critic_dims_fc1, 1)
-
-        self.optimizer = optim.Adam(self.parameters(), lr=self.beta)
+        self.input_dims = input_dims
+        self.value_fc1 = fc1
+        self.value_fc2 = fc2
+        self.fc1 = nn.Linear(input_dims, fc1)
+        self.fc2 = nn.Linear(fc1, fc2)
+        self.v = nn.Linear(fc2, 1)
+        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         self.device = T.device("cuda:0" if T.cuda.is_available() else "cpu")
         self.to(self.device)
 
-    def forward(self, state, action):
-        state_action_value = F.relu(self.fc1(T.cat([state, action], dim=1)))
-        state_action_value = F.relu(self.fc2(state_action_value))
-        return self.q(state_action_value)
+    def forward(self, state) -> T.Tensor:
+        x = T.tanh(self.fc1(state))
+        x = T.tanh(self.fc2(x))
+        v = self.v(x)
+        return v
 
     def save_checkpoint(self):
         print("... saving checkpoint ...")
@@ -46,40 +50,38 @@ class CriticNetwork(nn.Module):
 class ActorNetwork(nn.Module):
     def __init__(
         self,
-        alpha,
-        input_dims,
-        n_actions,
-        max_action=1,
-        actor_dims_fc1=256,
-        actor_dims_fc2=256,
-        name="actor",
-        checkpoint_dir="models",
+        learning_rate: float,
+        input_dims: int,
+        n_actions: int,
+        fc1: int = 256,
+        fc2: int = 256,
+        name: str = "actor",
+        checkpoint_dir: str = "models",
+        scenario: str = "unclassified",
     ):
         super(ActorNetwork, self).__init__()
-        self.alpha = alpha
-        self.checkpoint_dir = checkpoint_dir
-        self.checkpoint_file = os.path.join(self.checkpoint_dir, name + "maddpg")
+        self.checkpoint_dir = Path(checkpoint_dir) / scenario
+        self.checkpoint_file = self.checkpoint_dir / (name + "mappo")
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        self.fc1 = nn.Linear(input_dims, actor_dims_fc1)
-        self.fc2 = nn.Linear(actor_dims_fc1, actor_dims_fc2)
-        self.mu = nn.Linear(actor_dims_fc2, n_actions)
-
-        self.max_action = max_action
-
-        self.optimizer = optim.Adam(self.parameters(), lr=self.alpha)
+        self.fc1 = nn.Linear(input_dims, fc1)
+        self.fc2 = nn.Linear(fc1, fc2)
+        self.alpha = nn.Linear(fc2, n_actions)
+        self.beta = nn.Linear(fc2, n_actions)
+        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         self.device = T.device("cuda:0" if T.cuda.is_available() else "cpu")
         self.to(self.device)
 
-    def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        x = T.tanh(self.mu(x))
-        return self.max_action * x
+    def forward(self, state) -> Beta:
+        x = T.tanh(self.fc1(state))
+        x = T.tanh(self.fc2(x))
+        alpha = F.relu(self.alpha(x)) + 1.0
+        beta = F.relu(self.beta(x)) + 1.0
+        dist = Beta(alpha, beta)
+        return dist
 
     def save_checkpoint(self):
-        print("... saving checkpoint ...")
         T.save(self.state_dict(), self.checkpoint_file)
 
     def load_checkpoint(self):
-        print("... loading checkpoint ...")
         self.load_state_dict(T.load(self.checkpoint_file))

@@ -1,32 +1,36 @@
 import numpy as np
 import torch as T
+import time
 import rclpy
 from rclpy.node import Node
+from std_srvs.srv import Empty
 
 from multi_robot_active_slam_interfaces.srv import StepEnv, ResetEnv
 from multi_robot_active_slam_learning.learning.mappo.mappo import MAPPO
 from multi_robot_active_slam_learning.learning.mappo.memory import (
-    PPOMemory,
+    MAPPOMemory,
 )
-from multi_robot_active_slam_learning.learning.maddpg.utils import plot_learning_curve
 from multi_robot_active_slam_learning.common import utilities as util
 from multi_robot_active_slam_learning.common.settings import (
+    MAX_STEPS,
     NUMBER_OF_ROBOTS,
     ROBOT_OBSERVATION_SPACE,
     ROBOT_ACTION_SPACE,
     MAX_CONTINUOUS_ACTIONS,
-    TAU_MADDPG,
-    GAMMA_MADDPG,
-    BETA_MADDPG,
-    ALPHA_MADDPG,
-    ACTOR_MADDPG_FC1,
-    ACTOR_MADDPG_FC2,
-    CRITIC_MADDPG_FC1,
-    CRITIC_MADDPG_FC2,
-    MAX_MEMORY_SIZE,
-    BATCH_SIZE,
+    GAMMA_MAPPO,
+    N,
+    N_EPOCHS,
+    GAE_LAMBDA,
+    ENTROPHY_COEFFICIENT,
+    POLICY_CLIP,
+    BETA_MAPPO,
+    ALPHA_MAPPO,
+    ACTOR_MAPPO_FC1,
+    ACTOR_MAPPO_FC2,
+    CRITIC_MAPPO_FC1,
+    CRITIC_MAPPO_FC2,
+    BATCH_SIZE_MAPPO,
     TRAINING_EPISODES,
-    RANDOM_STEPS,
     FRAME_BUFFER_DEPTH,
     FRAME_BUFFER_SKIP,
 )
@@ -39,20 +43,23 @@ class LearningMAPPO(Node):
         self.number_of_agents = NUMBER_OF_ROBOTS
         self.stack_depth = FRAME_BUFFER_DEPTH  # Number of frames to stack
         self.frame_skip = FRAME_BUFFER_SKIP
-        self.current_frame = 0
 
         # Initializing state and action dimensions for each agent
         self.actor_dims = [
-            ROBOT_OBSERVATION_SPACE[0] for _ in range(self.number_of_agents)
+            ROBOT_OBSERVATION_SPACE[0] * self.stack_depth
+            for _ in range(self.number_of_agents)
         ]
         self.number_of_actions = [
             ROBOT_ACTION_SPACE[0] for _ in range(self.number_of_agents)
         ]
-        self.critic_dims = self.calculate_critic_input_dims()
+        self.critic_dims = sum(self.actor_dims)
 
-        # Creating frame buffers for each agent
+        # Creating frame buffers for each agent, initialised to 3
         self.frame_buffers = [
-            np.zeros((dim * self.stack_depth,)) for dim in self.actor_dims
+            np.full(
+                (self.stack_depth * ROBOT_OBSERVATION_SPACE[0]), 3, dtype=np.float32
+            )
+            for _ in range(self.number_of_agents)
         ]
 
         self.model_agents = MAPPO(
@@ -60,40 +67,44 @@ class LearningMAPPO(Node):
             critic_dims=self.critic_dims,
             n_agents=self.number_of_agents,
             n_actions=self.number_of_actions,
-            gamma=GAMMA_MADDPG,
-            alpha=ALPHA_MADDPG,
-            beta=BETA_MADDPG,
-            tau=TAU_MADDPG,
-            actor_dims_fc1=ACTOR_MADDPG_FC1,
-            actor_dims_fc2=ACTOR_MADDPG_FC2,
-            critic_dims_fc1=CRITIC_MADDPG_FC1,
-            critic_dims_fc2=CRITIC_MADDPG_FC2,
-            max_action=MAX_CONTINUOUS_ACTIONS,
-            min_action=MAX_CONTINUOUS_ACTIONS * -1,
-            stacked_frames=self.stack_depth,
+            n_epochs=N_EPOCHS,
+            entropy_coefficient=ENTROPHY_COEFFICIENT,
+            gae_lambda=GAE_LAMBDA,
+            policy_clip=POLICY_CLIP,
+            gamma=GAMMA_MAPPO,
+            alpha=ALPHA_MAPPO,
+            beta=BETA_MAPPO,
+            actor_fc1=ACTOR_MAPPO_FC1,
+            actor_fc2=ACTOR_MAPPO_FC2,
+            critic_fc1=CRITIC_MAPPO_FC1,
+            critic_fc2=CRITIC_MAPPO_FC2,
+            checkpoint_dir="models/",
+            scenario="multi_agent_reinforcement_learning_active_slam",
         )
 
-        self.critic_dims = sum(self.actor_dims)
-
-        self.memory = MultiAgentReplayBuffer(
-            max_size=MAX_MEMORY_SIZE,
-            critic_dims=self.critic_dims * self.stack_depth,
-            actor_dims=[dim * self.stack_depth for dim in self.actor_dims],
-            n_actions=self.number_of_actions,
+        self.memory = MAPPOMemory(
+            batch_size=BATCH_SIZE_MAPPO,
+            T=N,
             n_agents=self.number_of_agents,
-            batch_size=BATCH_SIZE,
+            critic_dims=self.critic_dims,
+            actor_dims=self.actor_dims,
+            n_actions=self.number_of_actions,
         )
-
-        self.total_steps = 0
-        self.episode = 0
 
         self.total_episodes = TRAINING_EPISODES
-        self.max_steps = 1_500_000
-        self.score_history = []
-        self.best_score = 0
+        self.max_steps = MAX_STEPS
+        self.score_history, self.step_history = [], []
+        self.best_score = -np.Inf
+        self.current_frame = 0
+        self.total_steps = 0
+        self.episode = 1
+        self.traj_length = 0
+        self.model_step_time = 0.01
 
         # --------------------- Clients ---------------------------#
 
+        self.gazebo_pause = self.create_client(Empty, "/pause_physics")
+        self.gazebo_unpause = self.create_client(Empty, "/unpause_physics")
         self.environment_step_client = self.create_client(StepEnv, "/environment_step")
         self.reset_environment_client = self.create_client(
             ResetEnv, "/reset_environment_rl"
@@ -108,112 +119,112 @@ class LearningMAPPO(Node):
         self.get_logger().info("Starting the learning loop")
         self.start()
 
-    def calculate_critic_input_dims(self):
-        stacked_actor_dims = ROBOT_OBSERVATION_SPACE[0] * self.stack_depth
-        total_state_dims = stacked_actor_dims * self.number_of_agents
-        total_action_dims = ROBOT_ACTION_SPACE[0] * self.number_of_agents
-        return total_state_dims + total_action_dims
-
     def update_frame_buffers(self, observations):
-        if self.current_frame % self.frame_skip == 0:
-            for i, obs in enumerate(observations):
-                self.frame_buffers[i] = np.roll(
-                    self.frame_buffers[i], -self.actor_dims[i]
-                )
-                self.frame_buffers[i][-self.actor_dims[i] :] = obs
+        for i, obs in enumerate(observations):
+            self.frame_buffers[i] = np.roll(
+                self.frame_buffers[i], -ROBOT_OBSERVATION_SPACE[0]
+            )
+            self.frame_buffers[i][-ROBOT_OBSERVATION_SPACE[0] :] = obs
 
     def get_stacked_observations(self, agent_idx):
-        # Retrieve and stack the observations for a specific agent
-        return self.frame_buffers[agent_idx].copy()
+        return self.frame_buffers[agent_idx]
+
+    def clear_frame_buffers(self):
+        for i in range(len(self.frame_buffers)):
+            self.frame_buffers[i].fill(3)
+
+    def action_adapter(self, action, max_action):
+        return 2 * (action - 0.5) * max_action
 
     # Main learning loop
     def start(self):
-        self.total_steps = 20000
-        while self.total_steps < self.max_steps:
-            observations = util.reset(self)
-            self.update_frame_buffers(observations)
+        util.pause_simulation(self)
+        while self.total_steps < MAX_STEPS:
+            obs = util.reset(self)
+            self.clear_frame_buffers()
+            self.update_frame_buffers(obs)
             raw_stacked_observations = [
                 self.get_stacked_observations(i) for i in range(self.number_of_agents)
             ]
+
+            util.unpause_simulation(self)
             global_stacked_observations = np.concatenate(raw_stacked_observations)
-            done = [False] * self.number_of_agents
+            done = False
             score = 0
             self.current_frame = 0
-            while not any(done):
+            while not done:
                 self.current_frame += 1
                 if self.current_frame % self.frame_skip == 0:
-                    if self.total_steps < RANDOM_STEPS:
-                        action = self.model_agents.choose_random_actions()
-                    else:
-                        action = self.model_agents.choose_actions(
-                            raw_stacked_observations
-                        )
+                    actions, probs = self.model_agents.choose_actions(
+                        raw_stacked_observations
+                    )
+                    adapted_actions = self.action_adapter(
+                        actions, MAX_CONTINUOUS_ACTIONS
+                    )
+                    next_obs, reward, terminals, truncated = util.step(
+                        self, adapted_actions
+                    )
 
-                    next_obs, reward, terminals, truncated = util.step(self, action)
+                    self.total_steps += 1
+                    self.traj_length += 1
 
-                    done = [d or t for d, t in zip(terminals, truncated)]
+                    done = any(d or t for d, t in zip(terminals, truncated))
+                    score = sum(reward)
+
                     self.update_frame_buffers(next_obs)
                     next_raw_stacked_observations = [
                         self.get_stacked_observations(i)
                         for i in range(self.number_of_agents)
                     ]
+
                     next_global_stacked_observations = np.concatenate(
                         next_raw_stacked_observations
                     )
 
-                    self.memory.store_transition(
+                    self.memory.store_memory(
                         raw_obs=raw_stacked_observations,
                         state=global_stacked_observations,
-                        action=action,
+                        action=actions,
+                        prob=probs,
                         reward=reward,
                         next_raw_obs=next_raw_stacked_observations,
                         next_state=next_global_stacked_observations,
-                        done=terminals or truncated,
+                        terminal=done,
                     )
 
-                    score += sum(reward)
-                    observations = next_obs
+                    if self.traj_length % N == 0:
+                        self.model_agents.learn(self.memory)
+                        self.traj_length = 0
+                        self.memory.clear_memory()
+                    obs = next_obs
                     global_stacked_observations = next_global_stacked_observations
 
-                self.total_steps += 1
-            self.finish_episode(score)
+                time.sleep(self.model_step_time)
 
-        x = [i + 1 for i in range(self.total_episodes)]
-        filename = "./src/multi_robot_active_slam_learning/multi_robot_active_slam_learning/learning/mappo/plots/mappo.png"
-        np.save("mappo_score.npy", np.array(self.score_history))
-        np.save("mappo_steps.npy", np.array(x))
-        plot_learning_curve(x, self.score_history, filename)
-        # self.shutdown_nodes()
-
-    # Handles end of episode (nice, clean and modular)
-    def finish_episode(self, score):
-        self.episode += 1
-        # Calculate the robot avearage score
-        self.score_history.append(score)
-        # Average the last 100 recent scores
-        avg_score = np.mean(self.score_history[-100:])
-        if avg_score > self.best_score:
-            self.best_score = avg_score
-            self.model_agents.save_models()
-
-        self.get_logger().info(
-            "Episode: {}, score: {}, Average Score: {:.1f}".format(
-                self.episode, score, avg_score
+            util.pause_simulation(self)
+            self.score_history.append(score)
+            self.step_history.append(self.total_steps)
+            avg_score = np.mean(self.score_history[-100:])
+            print(
+                f"Active SLAM Episode {self.episode} total steps {self.total_steps}"
+                f" avg score {avg_score :.1f}"
             )
-        )
+            self.episode += 1
 
-    def obs_list_to_state_vector(self, observation):
-        state = np.array([])
-        for obs in observation:
-            state = np.concatenate([state, obs])
-        return state
+        np.save(
+            "src/multi_robot_active_slam_learning/data/raw_data/mappo_scores.npy",
+            np.array(self.score_history),
+        )
+        np.save(
+            "src/multi_robot_active_slam_learning/data/raw_data/mappo_steps.npy",
+            np.array(self.step_history),
+        )
 
 
 def main():
     rclpy.init()
     learning_mappo = LearningMAPPO()
     rclpy.spin(learning_mappo)
-    # learning_mappo.destroy_node()
     rclpy.shutdown()
 
 

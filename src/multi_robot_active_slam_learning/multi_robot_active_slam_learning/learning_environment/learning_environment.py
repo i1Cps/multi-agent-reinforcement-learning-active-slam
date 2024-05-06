@@ -1,5 +1,8 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, qos_profile_sensor_data
+from rclpy.qos import ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
 
 import numpy as np
 import scipy
@@ -8,6 +11,7 @@ import math
 
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
+from rosgraph_msgs.msg import Clock
 from std_srvs.srv import Empty
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Twist, PoseWithCovarianceStamped, Pose
@@ -16,6 +20,7 @@ from multi_robot_active_slam_interfaces.srv import StepEnv, ResetEnv, ResetGazeb
 from multi_robot_active_slam_learning.common.settings import (
     NUMBER_OF_ROBOTS,
     NUMBER_OF_SCANS,
+    EPISODE_LENGTH_SEC,
 )
 from multi_robot_active_slam_learning.learning_environment.reward_function import (
     reward_function,
@@ -32,6 +37,12 @@ class LearningEnvironment(Node):
 
         # -------- Initialise subscribers, publishers, clients and services ------- #
 
+        qos = QoSProfile(depth=10)
+        qos_clock = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            depth=1,
+        )
+
         self.scan_subscribers = []
         self.covariance_matrix_subscribers = []
         self.odom_subscribers = []
@@ -39,14 +50,14 @@ class LearningEnvironment(Node):
 
         # Initialize all resources for each robot
         for i in range(1, self.num_robots + 1):
-            namespace = f"/robot{i}"  # Subscribers
+            namespace = f"/robot{i}"
 
             self.scan_subscribers.append(
                 self.create_subscription(
                     LaserScan,
                     f"{namespace}/scan",
                     lambda msg, robot_id=i - 1: self.scan_callback(msg, robot_id),
-                    1,
+                    qos_profile=qos_profile_sensor_data,
                 )
             )
 
@@ -57,7 +68,7 @@ class LearningEnvironment(Node):
                     lambda msg, robot_id=i - 1: self.covariance_matrix_callback(
                         msg, robot_id
                     ),
-                    10,
+                    qos,
                 )
             )
             self.odom_subscribers.append(
@@ -65,7 +76,7 @@ class LearningEnvironment(Node):
                     Odometry,
                     f"{namespace}/odom",
                     lambda msg, robot_id=i - 1: self.odom_callback(msg, robot_id),
-                    10,
+                    qos,
                 )
             )
 
@@ -77,7 +88,11 @@ class LearningEnvironment(Node):
             Pose,
             "/goal_position_reset_pose",
             self.goal_position_reset_pose_callback,
-            10,
+            qos,
+        )
+
+        self.clock_subscriber = self.create_subscription(
+            Clock, "/clock", self.clock_callback, qos_profile=qos_clock
         )
 
         # ------------------ Clients ---------------------------- #
@@ -133,13 +148,17 @@ class LearningEnvironment(Node):
         self.angular_velocities = np.zeros(self.num_robots)
 
         # Environment CONSTANTS
-        self.MAX_STEPS = 1000
+        self.EPISODE_LENGTH = 60
         self.GOAL_DISTANCE = 0.7
         self.COLLISION_DISTANCE = 0.18
 
         # Environment Variables
         self.done = False
         self.truncated = False
+        self.episode_end_time = np.Infinity
+        self.reset_episode_end_time = True
+        self.clock_msgs_skipped = 0
+        self.current_time = 0
         self.step_counter = 0
         self.goal_position = np.array([0.0, 0.0])
         self.distance_to_goal = np.full(self.num_robots, np.inf)
@@ -171,6 +190,19 @@ class LearningEnvironment(Node):
             else:
                 scan[i] = msg.ranges[i]
         self.scans[robot_id] = scan
+
+    def clock_callback(self, msg):
+        self.current_time = msg.clock.sec
+        if not self.reset_episode_end_time:
+            return
+
+        self.clock_msgs_skipped += 1
+        if self.clock_msgs_skipped <= 15:
+            return
+
+        self.episode_end_time = self.current_time + self.EPISODE_LENGTH
+        self.clock_msgs_skipped = 0
+        self.reset_episode_end_time = False
 
     def odom_callback(self, msg, robot_id):
         # Update robot-specific data
@@ -231,6 +263,7 @@ class LearningEnvironment(Node):
         self.linear_velocities = np.zeros(self.num_robots)
         self.angular_velocities = np.zeros(self.num_robots)
         self.step_counter = 0
+        self.episode_end_time = np.Infinity
 
         # Reset simulation
         req = ResetGazeboEnv.Request()
@@ -263,7 +296,6 @@ class LearningEnvironment(Node):
             state_vector = np.concatenate((scan_part, pose_part, d_opt_part))
             response.multi_robot_states[i].state = state_vector
 
-        time.sleep(2)
         # TODO: Use ros approved variation of time.sleep()
         # Pause execution
 
@@ -305,7 +337,9 @@ class LearningEnvironment(Node):
             return
         self.step_counter = 0
         self.done = False
+        # TODO: Reset the episode time step or time till episode over
         self.truncated = False
+        self.reset_episode_end_time = True
         environment_success_req = Empty.Request()
         while not self.environment_success_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info(
@@ -320,8 +354,8 @@ class LearningEnvironment(Node):
         for i in range(self.num_robots):
             found_goal.append(self.has_found_goal(i) and self.step_counter > 130)
             collided.append(self.has_collided(i))
-        self.truncated = self.step_counter > self.MAX_STEPS
-        self.done = collided
+        self.truncated = self.current_time > self.episode_end_time
+        self.done = any(collided)
         self.handle_found_goal(found_goal)
         for i in range(self.num_robots):
             scan_part = self.scans[i].astype(np.float32)
@@ -346,20 +380,16 @@ class LearningEnvironment(Node):
         for i in range(self.num_robots):
             self.linear_velocities[i] = request.multi_robot_actions[i].actions[0]
             self.angular_velocities[i] = request.multi_robot_actions[i].actions[1]
-            # if action_sum > 45:
-            # reward += -50
             desired_vel_cmd = Twist()
             desired_vel_cmd.linear.x = self.linear_velocities[i].item()
             desired_vel_cmd.angular.z = self.angular_velocities[i].item()
             self.cmd_vel_publishers[i].publish(desired_vel_cmd)
 
-        # Let simulation play out for a bit before observing
-        time.sleep(0.1)
-
         # Return new state
         response = self.get_step_response(response)
         if self.done or self.truncated:
             self.stop_robots()
+            self.reset_episode_end_time = True
         return response
 
 

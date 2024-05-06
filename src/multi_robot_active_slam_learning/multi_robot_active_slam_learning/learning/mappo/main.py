@@ -4,16 +4,18 @@ from memory import PPOMemory
 from utils import obs_list_to_state_vector
 from pettingzoo.mpe import simple_speaker_listener_v4
 
+env_id = "Simple_Speaker_Listener"
+
 
 def run():
-    env_id = "Simple_Speaker_Listener"
     env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-    random_seed = 0
     N = 2048
+    random_seed = 0
     batch_size = 64
     n_epochs = 10
     alpha = 3e-4
     scenario = "simple_speaker_listener"
+    n_procs = 8
 
     n_agents = env.max_num_agents
 
