@@ -141,7 +141,7 @@ class Agent:
                 self.actor.optimizer.zero_grad()
                 actor_loss.mean().backward()
 
-                T.nn.utils.clip_grad_norm_(self.actor.parameters(), 40)
+                T.nn.utils.clip_grad_norm_(self.actor.parameters(), 10)
                 self.actor.optimizer.step()
 
                 states = states_array[batch]

@@ -33,8 +33,8 @@ class CriticNetwork(nn.Module):
         self.to(self.device)
 
     def forward(self, state) -> T.Tensor:
-        x = T.tanh(self.fc1(state))
-        x = T.tanh(self.fc2(x))
+        x = T.relu(self.fc1(state))
+        x = T.relu(self.fc2(x))
         v = self.v(x)
         return v
 
@@ -73,8 +73,8 @@ class ActorNetwork(nn.Module):
         self.to(self.device)
 
     def forward(self, state) -> Beta:
-        x = T.tanh(self.fc1(state))
-        x = T.tanh(self.fc2(x))
+        x = T.relu(self.fc1(state))
+        x = T.relu(self.fc2(x))
         alpha = F.relu(self.alpha(x)) + 1.0
         beta = F.relu(self.beta(x)) + 1.0
         dist = Beta(alpha, beta)

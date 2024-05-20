@@ -1,22 +1,14 @@
-"""
-Module for simulating a learning environment in a multi-robot system for RL using ROS2.
-
-This module defines a LearningEnvironment node which facilitates the interaction between
-multiple robots in a simulated environment. It manages the state updates, action processing,
-and reward calculation necessary for reinforcement learning experiments.
-
-Author: Theo Moore-Calters
-License: MIT
-"""
-
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, qos_profile_sensor_data
 from rclpy.qos import ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+
 import numpy as np
 import scipy
 import time
 import math
+
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from rosgraph_msgs.msg import Clock
@@ -34,27 +26,13 @@ from multi_robot_active_slam_learning.learning_environment.reward_function impor
     reward_function,
 )
 
-MAX_LINEAR_SPEED = 0.22
-MAX_ANGULAR_SPEED = 2.0
-MAX_SCAN_DISTANCE = 3.5
-EIG_THRESHOLD = 1e-6
-EPISODE_LENGTH = 60
-GOAL_DISTANCE = 0.7
-COLLISION_DISTANCE = 0.18
-
 
 # This Node is reponsible for providing an interface for agents to take actions and recieve new states, rewards or both
 # Contains direct communication with our physics simulator, gazebo.
 class LearningEnvironment(Node):
-    """
-    A ROS2 Node for managing a multi-robot learning environment.
-
-    The node handles sensor data ingestion, action execution, and state transitions, providing
-    a controlled setup for developing and testing RL algorithms with multiple agents.
-    """
-
     def __init__(self):
         super().__init__("learning_environment")
+
         self.num_robots = NUMBER_OF_ROBOTS
 
         # -------- Initialise subscribers, publishers, clients and services ------- #
@@ -79,7 +57,7 @@ class LearningEnvironment(Node):
                     LaserScan,
                     f"{namespace}/scan",
                     lambda msg, robot_id=i - 1: self.scan_callback(msg, robot_id),
-                    1,
+                    qos_profile=qos_profile_sensor_data,
                 )
             )
 
@@ -90,7 +68,7 @@ class LearningEnvironment(Node):
                     lambda msg, robot_id=i - 1: self.covariance_matrix_callback(
                         msg, robot_id
                     ),
-                    10,
+                    qos,
                 )
             )
             self.odom_subscribers.append(
@@ -98,7 +76,7 @@ class LearningEnvironment(Node):
                     Odometry,
                     f"{namespace}/odom",
                     lambda msg, robot_id=i - 1: self.odom_callback(msg, robot_id),
-                    10,
+                    qos,
                 )
             )
 
@@ -110,7 +88,7 @@ class LearningEnvironment(Node):
             Pose,
             "/goal_position_reset_pose",
             self.goal_position_reset_pose_callback,
-            10,
+            qos,
         )
 
         self.clock_subscriber = self.create_subscription(
@@ -170,7 +148,7 @@ class LearningEnvironment(Node):
         self.angular_velocities = np.zeros(self.num_robots)
 
         # Environment CONSTANTS
-        self.EPISODE_LENGTH = 40
+        self.EPISODE_LENGTH = 30
         self.GOAL_DISTANCE = 0.7
         self.COLLISION_DISTANCE = 0.18
 
@@ -211,8 +189,6 @@ class LearningEnvironment(Node):
                 scan[i] = 0
             else:
                 scan[i] = msg.ranges[i]
-                if scan[i] < self.COLLISION_DISTANCE:
-                    self.stop_robots()
         self.scans[robot_id] = scan
 
     def clock_callback(self, msg):
@@ -288,7 +264,6 @@ class LearningEnvironment(Node):
         self.angular_velocities = np.zeros(self.num_robots)
         self.step_counter = 0
         self.episode_end_time = np.Infinity
-        self.reset_episode_end_time = True
 
         # Reset simulation
         req = ResetGazeboEnv.Request()
@@ -321,8 +296,8 @@ class LearningEnvironment(Node):
             state_vector = np.concatenate((scan_part, pose_part, d_opt_part))
             response.multi_robot_states[i].state = state_vector
 
+        time.sleep(2)
         # TODO: Use ros approved variation of time.sleep()
-        time.sleep(1.5)
         # Pause execution
 
         return response
@@ -351,6 +326,10 @@ class LearningEnvironment(Node):
         for i in range(self.num_robots):
             self.cmd_vel_publishers[i].publish(Twist())
 
+    # Check if the given scan shows a collision
+    def has_collided(self, robot_idx):
+        return bool(self.COLLISION_DISTANCE > np.min(self.scans[robot_idx]))
+
     def has_found_goal(self, robot_idx):
         return self.distance_to_goal[robot_idx] < self.GOAL_DISTANCE
 
@@ -375,16 +354,20 @@ class LearningEnvironment(Node):
         collided = []
         for i in range(self.num_robots):
             found_goal.append(self.has_found_goal(i) and self.step_counter > 130)
+            collided.append(self.has_collided(i))
+        print(
+            f"current time {self.current_time} and the time that episode ends {self.episode_end_time}"
+        )
+        poo = self.current_time > self.episode_end_time
+        self.truncated = self.current_time > self.episode_end_time
+        self.done = collided
+        self.handle_found_goal(found_goal)
+        for i in range(self.num_robots):
             scan_part = self.scans[i].astype(np.float32)
-            collided.append(bool(self.COLLISION_DISTANCE > np.min(scan_part)))
             pose_part = self.estimated_poses[i].astype(np.float32)
             d_opt_part = np.array([self.d_opts[i] * 10], dtype=np.float32)
             observation = np.concatenate((scan_part, pose_part, d_opt_part))
             response.multi_robot_states[i].state = observation
-        self.truncated = self.current_time > self.episode_end_time
-        self.done = any(collided)
-        self.handle_found_goal(found_goal)
-        for i in range(self.num_robots):
             response.multi_robot_rewards[i].reward = self.get_rewards(
                 found_goal[i],
                 collided[i],
@@ -398,6 +381,7 @@ class LearningEnvironment(Node):
 
     def environment_step_callback(self, request, response):
         self.step_counter += 1
+        print(self.step_counter)
 
         for i in range(self.num_robots):
             self.linear_velocities[i] = request.multi_robot_actions[i].actions[0]
@@ -408,8 +392,12 @@ class LearningEnvironment(Node):
             self.cmd_vel_publishers[i].publish(desired_vel_cmd)
 
         # Return new state
+        print(
+            f"lin vel: {self.linear_velocities[0]} and ang_vel: {self.angular_velocities[0]}"
+        )
         response = self.get_step_response(response)
         if self.done or self.truncated:
+            print("proably")
             self.stop_robots()
             self.reset_episode_end_time = True
         return response

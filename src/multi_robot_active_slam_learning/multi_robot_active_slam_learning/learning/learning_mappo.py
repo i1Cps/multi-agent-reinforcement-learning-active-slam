@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 import torch as T
 import time
 import rclpy
@@ -18,7 +19,6 @@ from multi_robot_active_slam_learning.common.settings import (
     ROBOT_ACTION_SPACE,
     MAX_CONTINUOUS_ACTIONS,
     GAMMA_MAPPO,
-    N,
     N_EPOCHS,
     GAE_LAMBDA,
     ENTROPHY_COEFFICIENT,
@@ -30,6 +30,7 @@ from multi_robot_active_slam_learning.common.settings import (
     CRITIC_MAPPO_FC1,
     CRITIC_MAPPO_FC2,
     BATCH_SIZE_MAPPO,
+    MINI_BATCHES_MAPPO,
     TRAINING_EPISODES,
     FRAME_BUFFER_DEPTH,
     FRAME_BUFFER_SKIP,
@@ -83,8 +84,8 @@ class LearningMAPPO(Node):
         )
 
         self.memory = MAPPOMemory(
-            batch_size=BATCH_SIZE_MAPPO,
-            T=N,
+            batch_size=MINI_BATCHES_MAPPO,
+            T=BATCH_SIZE_MAPPO,
             n_agents=self.number_of_agents,
             critic_dims=self.critic_dims,
             actor_dims=self.actor_dims,
@@ -100,6 +101,7 @@ class LearningMAPPO(Node):
         self.episode = 1
         self.traj_length = 0
         self.model_step_time = 0.01
+        self.score = 0
 
         # --------------------- Clients ---------------------------#
 
@@ -147,11 +149,13 @@ class LearningMAPPO(Node):
                 self.get_stacked_observations(i) for i in range(self.number_of_agents)
             ]
 
-            util.unpause_simulation(self)
             global_stacked_observations = np.concatenate(raw_stacked_observations)
             done = False
-            score = 0
+            self.score = 0
             self.current_frame = 0
+
+            time.sleep(0.5)
+            util.unpause_simulation(self)
             while not done:
                 self.current_frame += 1
                 if self.current_frame % self.frame_skip == 0:
@@ -169,7 +173,7 @@ class LearningMAPPO(Node):
                     self.traj_length += 1
 
                     done = any(d or t for d, t in zip(terminals, truncated))
-                    score = sum(reward)
+                    self.score = sum(reward)
 
                     self.update_frame_buffers(next_obs)
                     next_raw_stacked_observations = [
@@ -192,31 +196,42 @@ class LearningMAPPO(Node):
                         terminal=done,
                     )
 
-                    if self.traj_length % N == 0:
+                    if self.traj_length % BATCH_SIZE_MAPPO == 0:
+                        util.pause_simulation(self)
                         self.model_agents.learn(self.memory)
+                        util.unpause_simulation(self)
                         self.traj_length = 0
                         self.memory.clear_memory()
-                    obs = next_obs
                     global_stacked_observations = next_global_stacked_observations
+                    raw_stacked_observations = next_raw_stacked_observations
 
                 time.sleep(self.model_step_time)
 
             util.pause_simulation(self)
-            self.score_history.append(score)
+            self.score_history.append(self.score)
             self.step_history.append(self.total_steps)
             avg_score = np.mean(self.score_history[-100:])
             print(
                 f"Active SLAM Episode {self.episode} total steps {self.total_steps}"
-                f" avg score {avg_score :.1f}"
+                f" score {self.score} avg score {avg_score :.1f}"
             )
             self.episode += 1
 
+        mappo_scores_path = Path(
+            "src/multi_robot_active_slam_learning/data/raw_data/mappo_scores.npy"
+        )
+
+        mappo_steps_path = Path(
+            "src/multi_robot_active_slam_learning/data/raw_data/mappo_steps.npy"
+        )
+        mappo_scores_path.mkdir(parents=True, exist_ok=True)
+        mappo_steps_path.mkdir(parents=True, exist_ok=True)
         np.save(
-            "src/multi_robot_active_slam_learning/data/raw_data/mappo_scores.npy",
+            mappo_scores_path,
             np.array(self.score_history),
         )
         np.save(
-            "src/multi_robot_active_slam_learning/data/raw_data/mappo_steps.npy",
+            mappo_steps_path,
             np.array(self.step_history),
         )
 
