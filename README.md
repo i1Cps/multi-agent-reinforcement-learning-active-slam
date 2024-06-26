@@ -6,7 +6,7 @@
 
 [![-----------------------------------------------------](https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/solar.png)](#table-of-contents)
 
-## ➤ Table of Contents
+## ➤ Table of Contents ~CURRENTLY BROKEN~
 
 * [➤ :pencil: About The Project](#-pencil-about-the-project)
 * [➤ :floppy_disk: Key Project File Description](#-floppy_disk-key-project-file-description)
