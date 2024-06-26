@@ -1,84 +1,82 @@
 from multi_robot_active_slam_learning.learning.maddpg.agents import Agent
+from multi_robot_active_slam_learning.learning.maddpg.memory import (
+    MultiAgentReplayBuffer,
+)
+from typing import List, Dict, Any
 import numpy as np
 
 
 class MADDPG:
     def __init__(
         self,
-        actor_dims,
-        critic_dims,
-        n_agents,
-        n_actions,
-        max_action,
-        min_action,
-        alpha=1e-4,
-        beta=1e-3,
-        actor_dims_fc1=256,
-        actor_dims_fc2=256,
-        critic_dims_fc1=256,
-        critic_dims_fc2=256,
-        gamma=0.99,
-        tau=0.005,
-        stacked_frames=1,
-        checkpoint_dir="",
-        scenario="",
+        actor_input_dims: List[int],
+        critic_input_dims: int,
+        n_agents: int,
+        n_actions: List[int],
+        alpha: float,
+        beta: float,
+        gamma: float,
+        tau: float,
+        max_actions: np.ndarray,
+        min_actions: np.ndarray,
+        actor_fc1: int = 256,
+        actor_fc2: int = 256,
+        critic_fc1: int = 256,
+        critic_fc2: int = 256,
     ):
+        # Handle agent instances in a list
         self.agents = []
         self.n_actions = n_actions
-        self.max_action = max_action
-        self.min_action = min_action
-        checkpoint_dir += scenario
         for agent_idx in range(n_agents):
-            min_action = min_action
-            max_action = max_action
             self.agents.append(
                 Agent(
-                    actor_dims=actor_dims[agent_idx],
-                    critic_dims=critic_dims,
-                    n_actions=n_actions[agent_idx],
-                    agent_idx=agent_idx,
+                    actor_dims=actor_input_dims[agent_idx],
+                    critic_dims=critic_input_dims,
                     alpha=alpha,
-                    tau=tau,
                     beta=beta,
-                    actor_dims_fc1=actor_dims_fc1,
-                    actor_dims_fc2=actor_dims_fc2,
-                    critic_dims_fc1=critic_dims_fc1,
-                    critic_dims_fc2=critic_dims_fc2,
-                    stacked_frames=stacked_frames,
+                    tau=tau,
                     gamma=gamma,
-                    min_action=min_action,
-                    max_action=max_action,
-                    checkpoint_dir=checkpoint_dir,
+                    agent_idx=agent_idx,
+                    n_actions=n_actions[agent_idx],
+                    min_actions=min_actions,
+                    max_actions=max_actions,
+                    actor_fc1=actor_fc1,
+                    actor_fc2=actor_fc2,
+                    critic_fc1=critic_fc1,
+                    critic_fc2=critic_fc2,
                 )
             )
 
-    def choose_actions(self, raw_obs, evaluate=False):
+    # Choose actions for each agent
+    def choose_actions(self, single_obs: List) -> np.ndarray:
         actions = np.empty((len(self.agents), self.n_actions[0]), dtype=np.float32)
-        for idx, agent in enumerate(self.agents):
-            action = agent.choose_action(raw_obs[idx], evaluate)
-            actions[idx] = action
+        for agent_idx, agent in enumerate(self.agents):
+            action = agent.choose_action(single_obs[agent_idx], eval=False)
+            actions[agent_idx] = action
         return actions
 
-    def choose_random_actions(self):
-        # Initialize an array to hold the actions for all agents
-        actions = np.array(
-            [
-                np.random.normal(0, agent.max_action * 0.2, size=agent.n_actions)
-                for agent in self.agents
-            ]
+    # Choose random action for each agent
+    def choose_random_actions(self) -> np.ndarray:
+        random_actions = np.empty(
+            (len(self.agents), self.n_actions[0]), dtype=np.float32
         )
-        for idx, agent in enumerate(self.agents):
-            actions[idx] = np.clip(actions[idx], -agent.max_action, agent.max_action)
-        return actions
+        for agent_idx, agent in enumerate(self.agents):
+            action = agent.choose_random_actions()
+            random_actions[agent_idx] = action
+        return random_actions
 
-    def learn(self, memory):
+    def learn(self, memory: MultiAgentReplayBuffer):
         for agent in self.agents:
             agent.learn(memory, self.agents)
 
-    def save_checkpoint(self):
+    def reset_noise(self) -> None:
         for agent in self.agents:
-            agent.save_models()
+            agent.ou_noise.reset()
 
-    def load_checkpoint(self):
+    def save(self, filepath) -> None:
         for agent in self.agents:
-            agent.load_models()
+            agent.save(filepath)
+
+    def load(self, filepath) -> None:
+        for agent in self.agents:
+            agent.load(filepath)
