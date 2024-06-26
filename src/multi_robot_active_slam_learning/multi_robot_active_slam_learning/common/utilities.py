@@ -1,68 +1,107 @@
+from multi_robot_active_slam_learning.common.settings import NUMBER_OF_ROBOTS
 import rclpy
-import torch
 import numpy as np
 from std_srvs.srv import Empty
 from multi_robot_active_slam_interfaces.srv import StepEnv, ResetEnv
-from multi_robot_active_slam_learning.common.settings import NUMBER_OF_ROBOTS
+import matplotlib.pyplot as plt
 
 
-# Pause Gazebo Physics simulation
-def pause_simulation(agent_self):
-    while not agent_self.gazebo_pause.wait_for_service(timeout_sec=1.0):
-        agent_self.get_logger().info(
-            "pause gazebo service not available, waiting again..."
-        )
-    future = agent_self.gazebo_pause.call_async(Empty.Request())
-    while rclpy.ok():
-        rclpy.spin_once(agent_self)
-        if future.done():
-            return
+def plot_training_data(
+    steps_file,
+    scores_file,
+    goal_history_file,
+    learning_plot_filename,
+    goals_plot_filename,
+    learning_title="Reinforcement Learning Algorithm Returns",
+    goals_title="Average Goals per Episode",
+):
+    # Plot learning curve
+    steps = np.load(steps_file)
+    scores = np.load(scores_file)
+    running_avg_scores = np.zeros(len(scores))
+    for i in range(len(running_avg_scores)):
+        running_avg_scores[i] = np.mean(scores[max(0, i - 100) : (i + 1)])
+
+    f1 = plt.figure("Learning Curve")  # Start a new figure
+    plt.plot(steps, running_avg_scores)
+    plt.title(learning_title)
+    plt.xlabel("Steps")
+    plt.ylabel("Scores")
+    plt.savefig(learning_plot_filename)
+
+    # Plot goals history
+    goal_history = np.load(goal_history_file)
+    running_avg_goals = np.zeros(len(goal_history))
+    for i in range(len(running_avg_goals)):
+        running_avg_goals[i] = np.mean(goal_history[max(0, i - 100) : (i + 1)])
+
+    f2 = plt.figure("Goals History")  # Start a new figure
+    plt.plot(running_avg_goals)
+    plt.title(goals_title)
+    plt.xlabel("Episode")
+    plt.ylabel("Average Goals")
+    plt.savefig(goals_plot_filename)
+
+    # Show all plots
+    plt.show()
 
 
-# Unpause Gazebo Physics simulation
-def unpause_simulation(agent_self):
-    while not agent_self.gazebo_unpause.wait_for_service(timeout_sec=1.0):
-        agent_self.get_logger().info(
-            "unpause gazebo service not available, waiting again..."
-        )
-    future = agent_self.gazebo_unpause.call_async(Empty.Request())
-    while rclpy.ok():
-        rclpy.spin_once(agent_self)
-        if future.done():
-            return
-
-
-# Function communicates with environment node, it request action and expects response
-# containing observation, reward, and whether episode has finished or truncated
-def step(agent_self, actions, discrete=False):
+# Communicates to the Learning Environment Node that it should step the environment using these actions
+# It then expects typical reinforcement learning items back
+def step(agent_self, actions_array):
     req = StepEnv.Request()
-    for i in range(NUMBER_OF_ROBOTS):
-        agent_actions = np.array(actions[i], dtype=np.float32)
-        req.multi_robot_actions[i].actions = agent_actions
+    for robot in range(NUMBER_OF_ROBOTS):
+        actions = np.array(
+            (actions_array[robot][0], actions_array[robot][1]), dtype=np.float32
+        )
 
-    while not agent_self.environment_step_client.wait_for_service(timeout_sec=1.0):
+        req.robot_requests[robot].actions = actions
+
+    while not agent_self.step_environment_client.wait_for_service(timeout_sec=1.0):
         agent_self.get_logger().info(
             "environment step service not available, waiting again..."
         )
-    future = agent_self.environment_step_client.call_async(req)
+    future = agent_self.step_environment_client.call_async(req)
 
     while rclpy.ok():
         rclpy.spin_once(agent_self)
         if future.done():
             if future.result() is not None:
                 res = future.result()
-                raw_obs = []
+
+                states = []
                 rewards = []
                 dones = []
                 truncated = []
 
-                for i in range(NUMBER_OF_ROBOTS):
-                    raw_obs.append(res.multi_robot_states[i].state)
-                    rewards.append(res.multi_robot_rewards[i].reward)
-                    dones.append(res.multi_robot_terminals[i].done)
-                    truncated.append(res.multi_robot_terminals[i].truncated)
+                collided = False
+                goal_found = 0
+                distance_to_goal = []
 
-                return raw_obs, rewards, dones, truncated
+                for robot in range(NUMBER_OF_ROBOTS):
+                    states.append(res.robot_responses[robot].observation)
+                    rewards.append(res.robot_responses[robot].reward)
+                    dones.append(res.robot_responses[robot].done)
+                    truncated.append(res.robot_responses[robot].truncated)
+
+                    collided = collided or res.robot_responses[robot].info.collided
+                    goal_found = (
+                        goal_found or res.robot_responses[robot].info.goal_found
+                    )
+                    distance_to_goal.append(
+                        res.robot_responses[robot].info.distance_to_goal
+                    )
+
+                info = {
+                    "collided": collided,
+                    "goal_found": goal_found,
+                    "distance_to_goal": distance_to_goal,
+                }
+                if info["goal_found"]:
+                    print(info)
+                    print(info["goal_found"])
+
+                return states, rewards, dones, truncated, info
             else:
                 agent_self.get_logger().error(
                     "Exception while calling service: {0}".format(future.exception())
@@ -70,7 +109,7 @@ def step(agent_self, actions, discrete=False):
                 print("Error getting step service response, this wont output anywhere")
 
 
-# Make this spin til complete
+# Communicates to the Learning Environment Node that it should reset everything
 def reset(agent_self):
     req = ResetEnv.Request()
     while not agent_self.reset_environment_client.wait_for_service(timeout_sec=1.0):
@@ -84,12 +123,33 @@ def reset(agent_self):
         if future.done():
             if future.result() is not None:
                 res = future.result()
-                states_list = [
-                    np.array(state.state) for state in res.multi_robot_states
-                ]
-                return states_list
+                observations = []
+                for robot in range(NUMBER_OF_ROBOTS):
+                    observations.append(res.robot_responses[robot].observation)
+                return observations
             else:
                 agent_self.get_logger().error(
                     "Exception while calling service: {0}".format(future.exception())
                 )
                 print("Error resetting the env, if thats even possible ")
+
+
+# Communicates to the Learning Environment Node that it should skip a frame
+def skip_frame(agent_self):
+    req = Empty.Request()
+    while not agent_self.skip_environment_frame_client.wait_for_service(
+        timeout_sec=1.0
+    ):
+        agent_self.get_logger().info("Frame skip service not available, waiting ")
+    future = agent_self.skip_environment_frame_client.call_async(req)
+
+    while rclpy.ok():
+        rclpy.spin_once(agent_self)
+        if future.done():
+            if future.result() is not None:
+                return
+            else:
+                agent_self.get_logger().error(
+                    "Exception while calling service: {0}".format(future.exception())
+                )
+                print("Error skipping the env, if thats even possible ")

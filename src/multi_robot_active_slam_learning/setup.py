@@ -11,11 +11,9 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
-        (os.path.join("share", package_name, "config"), glob("config/*")),
-        (
-            os.path.join("share", package_name, "launch"),
-            glob(os.path.join("launch", "*launch.[pxy][yma]*")),
-        ),
+        (os.path.join("share", package_name, "plots"), glob("plots/*")),
+        (os.path.join("share", package_name, "raw_data"), glob("raw_data/*")),
+        (os.path.join("share", package_name, "models"), glob("models/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -26,10 +24,10 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "learning_environment = multi_robot_active_slam_learning.learning_environment.learning_environment:main",
-            "gazebo_environment = multi_robot_active_slam_learning.gazebo_environment.gazebo_environment:main",
             "learning_maddpg = multi_robot_active_slam_learning.learning.learning_maddpg:main",
             "learning_mappo = multi_robot_active_slam_learning.learning.learning_mappo:main",
+            "learning_environment = multi_robot_active_slam_learning.learning_environment.learning_environment:main",
+            "gazebo_bridge = multi_robot_active_slam_learning.gazebo_bridge.gazebo_bridge:main",
         ],
     },
 )
