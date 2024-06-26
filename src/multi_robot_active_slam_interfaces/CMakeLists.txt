@@ -10,20 +10,19 @@ find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
-set(msg_files
-  "msg/RobotActions.msg"
-  "msg/RobotReward.msg"
-  "msg/RobotState.msg"
-  "msg/RobotTerminal.msg"
-)
 
+set(msg_files
+  "msg/InfoMsg.msg"
+  "msg/RobotResetResponse.msg"
+  "msg/RobotStepRequest.msg"
+  "msg/RobotStepResponse.msg"
+)
 set(srv_files
   "srv/StepEnv.srv"
   "srv/ResetEnv.srv"
   "srv/ResetGazeboEnv.srv"
   DEPENDENCIES geometry_msgs
-  )
-
+)
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
